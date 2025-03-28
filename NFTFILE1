@@ -1,0 +1,805 @@
+import os
+import json
+import time
+import pandas as pd
+import numpy as np
+import requests
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.tsa.statespace.varmax import VARMAX
+from statsmodels.tsa.api import VAR
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.vector_ar.vecm import coint_johansen
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from pmdarima import auto_arima
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import statsmodels.api as sm
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from scipy import stats
+import warnings
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
+from pytrends.request import TrendReq
+import networkx as nx
+from tqdm import tqdm
+
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+class NFTBrandEquityAnalyzer:
+    def __init__(self, api_key, network="eth-mainnet"):
+        """
+        Initialize the NFT Brand Equity Analyzer.
+        
+        Parameters:
+        -----------
+        api_key : str
+            Alchemy API key
+        network : str
+            Blockchain network to use (default: eth-mainnet)
+        """
+        self.API_KEY = api_key
+        self.NETWORK = network
+        self.BASE_URL = f"https://{self.NETWORK}.g.alchemy.com/v2/{self.API_KEY}"
+        
+        # Define brand categories and their known collections
+        self.brand_categories = {
+            'established_fashion': [
+                '0x9c8ff314c9bc7f6e59a9d9225fb22946427edc03',  # Adidas Originals
+                '0x28472a58a490c5e09a238847f66a68a47cc76f0f',  # Nike - RTFKT
+                '0x4c1564d3fcd58d4f5af18dbb7dcd0f74d486a14c',  # Gucci
+                '0x495f947276749ce646f68ac8c248420045cb7b5e',  # Louis Vuitton
+                '0x932261f9fc8da46c4a22e31b45c4de60623848bf'   # Burberry
+            ],
+            'established_tech': [
+                '0x50f5474724e0ee42d9a4e711ccfb275809fd6d4a',  # Meta (Facebook)
+                '0x1a92f7381b9f03921564a437210bb9396471050c',  # Cool Cats (Meta Collab)
+                '0x8a90cab2b38dba80c64b7734e58ee1db38b8992e',  # Samsung
+                '0x0b4b2ba334f476c8f41bfe52a428d6891755554d'   # Twitter Blue
+            ],
+            'crypto_native': [
+                '0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d',  # Bored Ape Yacht Club
+                '0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb',  # CryptoPunks
+                '0x23581767a106ae21c074b2276d25e5c3e136a68b',  # Moonbirds
+                '0x7bd29408f11d2bfc23c34f18275bbf23bb716bc7'   # Meebits
+            ],
+            'emerging_creators': [
+                '0x59468516a8259058bad1ca5f8f4bff190d30e066',  # Invisible Friends
+                '0x8943c7bac1914c9a7aba750bf2b6b09fd21037e0',  # Doodles
+                '0x3bf2922f4520a8ba0c2efc3d2a1539678dad5e9d',  # Clone X
+                '0xe785e82358879f061bc3dcac6f0444462d4b5330'   # World of Women
+            ]
+        }
+        
+        # Define brand equity metrics (elaborate for academic-level analysis)
+        self.brand_equity_metrics = [
+            'brand_awareness_index',      # Composite of social media mentions, Google Trends data, etc.
+            'brand_loyalty_score',        # Repeat buyer ratio, retention metrics
+            'perceived_quality_index',    # Community ratings, expert reviews weighted score
+            'premium_price_tolerance',    # Willingness to pay premium compared to category average
+            'brand_association_strength', # Network centrality in brand association graphs
+            'brand_resonance_factor',     # Emotional connection metrics (social engagement intensity)
+            'brand_heritage_coefficient', # Historical significance and established presence
+            'market_penetration_rate',    # Share of unique wallets interacting with brand vs. total market
+            'community_engagement_depth', # Weighted interactions (Discord, Twitter, etc.)
+            'cross_platform_presence',    # Multi-channel brand visibility
+        ]
+        
+        # Initialize empty dataframes
+        self.nft_transaction_data = pd.DataFrame()
+        self.brand_equity_data = pd.DataFrame()
+        self.merged_analysis_data = pd.DataFrame()
+        
+    def fetch_nft_sales(self, contract_address, days_back=180):
+        """
+        Fetch NFT sales data for a given collection over a specified period
+        
+        Parameters:
+        -----------
+        contract_address : str
+            NFT collection contract address
+        days_back : int
+            Number of days back to collect data (default: 180)
+            
+        Returns:
+        --------
+        DataFrame with transaction data
+        """
+        print(f"Fetching transactions for contract: {contract_address}")
+        
+        # Calculate start timestamp (days_back days ago)
+        start_timestamp = int((datetime.now() - timedelta(days=days_back)).timestamp())
+        
+        # Initialize empty list to store transaction data
+        all_transactions = []
+        
+        # Set up pagination parameters
+        page_key = None
+        more_pages = True
+        
+        # Implement pagination to get all results
+        while more_pages:
+            # Prepare request parameters
+            params = {
+                "fromBlock": "0x0",
+                "toBlock": "latest",
+                "withMetadata": "true",
+                "excludeZeroValue": "true",
+                "contractAddresses": [contract_address],
+                "category": ["erc721", "erc1155"],
+                "startTimestamp": hex(start_timestamp),
+                "order": "asc"
+            }
+            
+            if page_key:
+                params["pageKey"] = page_key
+            
+            # Make API request
+            headers = {"Accept": "application/json"}
+            response = requests.get(
+                f"{self.BASE_URL}/getNFTSales",
+                headers=headers,
+                params=params
+            )
+            
+            # Check for API limits and handle rate limiting
+            if response.status_code == 429:
+                print("Rate limit reached, waiting 1 minute...")
+                time.sleep(60)
+                continue
+                
+            if response.status_code != 200:
+                print(f"Error fetching data: {response.status_code}, {response.text}")
+                break
+                
+            # Parse response
+            result = response.json()
+            
+            # Add transactions to our list
+            if "nftSales" in result:
+                all_transactions.extend(result["nftSales"])
+            
+            # Check for more pages
+            if "pageKey" in result:
+                page_key = result["pageKey"]
+            else:
+                more_pages = False
+                
+            # Sleep to avoid hitting rate limits
+            time.sleep(0.2)
+        
+        # Convert to DataFrame
+        if not all_transactions:
+            print(f"No transactions found for {contract_address}")
+            return pd.DataFrame()
+            
+        df = pd.json_normalize(all_transactions)
+        
+        # Add brand category
+        for category, addresses in self.brand_categories.items():
+            if contract_address.lower() in [addr.lower() for addr in addresses]:
+                df['brand_category'] = category
+                
+        # Add contract address
+        df['contract_address'] = contract_address
+        
+        # Convert timestamp to datetime
+        if 'blockTimestamp' in df.columns:
+            df['date'] = pd.to_datetime(df['blockTimestamp'])
+            df['year_month'] = df['date'].dt.strftime('%Y-%m')
+            
+        # Extract price in native currency (ETH)
+        if 'sellerFee.amount' in df.columns:
+            df['price_eth'] = df['sellerFee.amount'].astype(float) / 1e18
+        
+        return df
+    
+    def collect_all_nft_data(self):
+        """
+        Collect NFT transaction data for all defined brand categories and collections
+        """
+        all_data = []
+        
+        # Loop through all brand categories and collect data
+        for category, addresses in self.brand_categories.items():
+            print(f"Collecting data for category: {category}")
+            for address in addresses:
+                df = self.fetch_nft_sales(address)
+                if not df.empty:
+                    all_data.append(df)
+                    
+                # Sleep to avoid hitting rate limits
+                time.sleep(1)
+        
+        # Combine all data
+        if all_data:
+            self.nft_transaction_data = pd.concat(all_data, ignore_index=True)
+            print(f"Collected {len(self.nft_transaction_data)} transactions in total")
+        else:
+            print("No data collected")
+    
+    def generate_brand_equity_metrics(self):
+        """
+        Generate brand equity metrics for each collection.
+        In a real-world scenario, this would involve collecting data from:
+        - Social media platforms (Twitter, Discord, etc.)
+        - Google Trends
+        - Brand surveys
+        - Expert ratings
+        
+        For this demonstration, we'll simulate these metrics based on the transaction data.
+        """
+        if self.nft_transaction_data.empty:
+            print("No transaction data available. Please collect NFT data first.")
+            return
+            
+        # Get unique combinations of contract address and year-month
+        contract_months = self.nft_transaction_data.groupby(['contract_address', 'year_month']).size().reset_index()
+        contract_months = contract_months.rename(columns={0: 'transaction_count'})
+        
+        # Initialize brand equity metrics DataFrame
+        brand_metrics = []
+        
+        # For each contract address and month, generate simulated brand metrics
+        for _, row in contract_months.iterrows():
+            contract = row['contract_address']
+            year_month = row['year_month']
+            
+            # Get the brand category
+            brand_category = self.nft_transaction_data[
+                self.nft_transaction_data['contract_address'] == contract
+            ]['brand_category'].iloc[0]
+            
+            # Get transaction data for this contract and month
+            month_data = self.nft_transaction_data[
+                (self.nft_transaction_data['contract_address'] == contract) & 
+                (self.nft_transaction_data['year_month'] == year_month)
+            ]
+            
+            # Calculate base metrics from transaction data
+            avg_price = month_data['price_eth'].mean()
+            tx_count = len(month_data)
+            unique_buyers = month_data['buyerAddress'].nunique()
+            unique_sellers = month_data['sellerAddress'].nunique()
+            
+            # Simulate brand equity metrics based on real transaction data
+            # In practice, these would come from external APIs, surveys, etc.
+            
+            # Base parameters affected by brand category
+            category_base_values = {
+                'established_fashion': [0.8, 0.7, 0.85, 0.9, 0.75, 0.8, 0.95, 0.7, 0.65, 0.85],
+                'established_tech': [0.85, 0.65, 0.8, 0.75, 0.8, 0.7, 0.9, 0.8, 0.7, 0.9],
+                'crypto_native': [0.9, 0.8, 0.75, 0.7, 0.85, 0.9, 0.6, 0.85, 0.9, 0.8],
+                'emerging_creators': [0.7, 0.6, 0.65, 0.6, 0.7, 0.75, 0.5, 0.6, 0.8, 0.65]
+            }
+            
+            # Get base values for this category
+            base_values = category_base_values.get(brand_category, [0.5] * 10)
+            
+            # Parse year and month for time-based variations
+            year, month = map(int, year_month.split('-'))
+            time_factor = (year - 2021) * 12 + (month - 1)  # Months since Jan 2021
+            
+            # Create metrics dictionary
+            metrics = {
+                'contract_address': contract,
+                'brand_category': brand_category,
+                'year_month': year_month,
+                'average_price': avg_price,
+                'transaction_count': tx_count,
+                'unique_buyers': unique_buyers,
+                'unique_sellers': unique_sellers
+            }
+            
+            # Add simulated brand equity metrics with realistic patterns
+            for i, metric in enumerate(self.brand_equity_metrics):
+                # Base value from category
+                base = base_values[i]
+                
+                # Add time trends (increasing for established brands, bell curve for others)
+                if brand_category in ['established_fashion', 'established_tech']:
+                    time_trend = min(0.2, 0.01 * time_factor)  # Slow steady increase
+                else:
+                    # Bell curve peaking around month 12-18
+                    time_trend = 0.2 * np.exp(-0.5 * ((time_factor - 15) / 10) ** 2)
+                
+                # Add price correlation (some metrics correlate with higher prices)
+                price_factor = 0.1 * (avg_price / 1.0)  # Normalized to typical ETH price
+                
+                # Add activity correlation (some metrics correlate with transaction volume)
+                activity_factor = 0.05 * np.log1p(tx_count / 10)
+                
+                # Add randomness
+                noise = np.random.normal(0, 0.05)
+                
+                # Combine factors and clip to valid range
+                value = np.clip(base + time_trend + price_factor + activity_factor + noise, 0.1, 1.0)
+                
+                # Add to metrics dictionary
+                metrics[metric] = value
+            
+            brand_metrics.append(metrics)
+        
+        # Create DataFrame
+        self.brand_equity_data = pd.DataFrame(brand_metrics)
+        print(f"Generated brand equity metrics for {len(self.brand_equity_data)} contract-months")
+    
+    def merge_and_prepare_data(self):
+        """
+        Merge transaction data with brand equity metrics and prepare for time series analysis
+        """
+        if self.nft_transaction_data.empty or self.brand_equity_data.empty:
+            print("Missing either transaction data or brand equity data.")
+            return
+        
+        # Group transaction data by contract_address and year_month
+        transaction_agg = self.nft_transaction_data.groupby(['contract_address', 'year_month', 'brand_category']).agg({
+            'price_eth': ['mean', 'median', 'std', 'count'],
+            'buyerAddress': 'nunique',
+            'sellerAddress': 'nunique'
+        }).reset_index()
+        
+        # Flatten multi-level columns
+        transaction_agg.columns = ['_'.join(col).strip('_') for col in transaction_agg.columns.values]
+        
+        # Merge with brand equity data
+        merged_data = pd.merge(
+            transaction_agg,
+            self.brand_equity_data,
+            on=['contract_address', 'year_month', 'brand_category'],
+            how='inner'
+        )
+        
+        # Calculate additional metrics
+        merged_data['price_premium'] = merged_data['price_eth_mean'] / merged_data.groupby('year_month')['price_eth_mean'].transform('mean')
+        merged_data['volume_share'] = merged_data['price_eth_count'] / merged_data.groupby('year_month')['price_eth_count'].transform('sum')
+        
+        # Calculate time lags (1, 3, and 6 months) for key metrics
+        for metric in self.brand_equity_metrics + ['price_eth_mean', 'price_eth_count']:
+            for lag in [1, 3, 6]:
+                merged_data[f'{metric}_lag{lag}'] = merged_data.groupby('contract_address')[metric].shift(lag)
+        
+        # Drop rows with NaN due to lagging
+        merged_data = merged_data.dropna()
+        
+        # Convert year_month to datetime for proper time series handling
+        merged_data['date'] = pd.to_datetime(merged_data['year_month'] + '-01')
+        merged_data = merged_data.sort_values(['contract_address', 'date'])
+        
+        self.merged_analysis_data = merged_data
+        print(f"Prepared {len(self.merged_analysis_data)} observations for analysis")
+        
+    def run_time_series_regression(self):
+        """
+        Perform time-series regression analysis to understand the relationship
+        between brand equity metrics and NFT performance over time
+        """
+        if self.merged_analysis_data.empty:
+            print("No analysis data available. Please prepare data first.")
+            return
+        
+        results = {}
+        
+        # Define dependent variables to analyze
+        dependent_vars = ['price_eth_mean', 'price_premium', 'price_eth_count', 'volume_share']
+        
+        # Run separate regressions for each brand category and dependent variable
+        for category in self.merged_analysis_data['brand_category'].unique():
+            category_data = self.merged_analysis_data[self.merged_analysis_data['brand_category'] == category]
+            
+            category_results = {}
+            for dep_var in dependent_vars:
+                print(f"Running time-series regression for {category} - {dep_var}")
+                
+                # Select variables for regression
+                X_vars = self.brand_equity_metrics + [f'{metric}_lag1' for metric in self.brand_equity_metrics[:5]]
+                
+                # Prepare data
+                X = category_data[X_vars]
+                y = category_data[dep_var]
+                
+                # Standardize variables
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X)
+                X_scaled = sm.add_constant(X_scaled)  # Add constant
+                
+                # Run OLS regression with HAC standard errors (Newey-West)
+                model = sm.OLS(y, X_scaled)
+                results_robust = model.fit(cov_type='HAC', cov_kwds={'maxlags': 3})
+                
+                # Store results
+                category_results[dep_var] = {
+                    'model': results_robust,
+                    'r_squared': results_robust.rsquared,
+                    'adj_r_squared': results_robust.rsquared_adj,
+                    'significant_vars': [
+                        (X_vars[i], results_robust.params[i+1], results_robust.pvalues[i+1])
+                        for i in range(len(X_vars))
+                        if results_robust.pvalues[i+1] < 0.05
+                    ]
+                }
+                
+                print(f"R² = {results_robust.rsquared:.4f}, Adj. R² = {results_robust.rsquared_adj:.4f}")
+                print(f"Significant variables: {len(category_results[dep_var]['significant_vars'])}")
+            
+            results[category] = category_results
+        
+        return results
+    
+    def panel_var_analysis(self):
+        """
+        Perform Panel Vector Autoregression (PVAR) analysis to understand 
+        dynamic relationships between brand equity and NFT performance
+        """
+        if self.merged_analysis_data.empty:
+            print("No analysis data available. Please prepare data first.")
+            return
+            
+        # Define key variables for PVAR
+        price_var = 'price_eth_mean'
+        volume_var = 'price_eth_count'
+        brand_vars = ['brand_awareness_index', 'brand_loyalty_score', 'perceived_quality_index']
+        
+        # Initialize results dictionary
+        pvar_results = {}
+        
+        # Run separate PVAR for each brand category
+        for category in self.merged_analysis_data['brand_category'].unique():
+            print(f"Running PVAR analysis for {category}")
+            category_data = self.merged_analysis_data[self.merged_analysis_data['brand_category'] == category]
+            
+            # Prepare data for each contract separately
+            contract_results = {}
+            
+            for contract in category_data['contract_address'].unique():
+                contract_data = category_data[category_data['contract_address'] == contract]
+                
+                if len(contract_data) >= 12:  # Need enough time periods for VAR
+                    # Select and standardize variables
+                    var_data = contract_data[[price_var, volume_var] + brand_vars]
+                    var_data_scaled = pd.DataFrame(
+                        StandardScaler().fit_transform(var_data),
+                        columns=var_data.columns,
+                        index=var_data.index
+                    )
+                    
+                    # Check for stationarity
+                    stationary = True
+                    for col in var_data_scaled.columns:
+                        adf_result = adfuller(var_data_scaled[col].dropna())
+                        if adf_result[1] > 0.05:
+                            # If not stationary, take first difference
+                            var_data_scaled[col] = var_data_scaled[col].diff().dropna()
+                    
+                    # Drop NaN from differencing
+                    var_data_scaled = var_data_scaled.dropna()
+                    
+                    if len(var_data_scaled) >= 8:  # Still need enough observations after differencing
+                        # Determine optimal lag using AIC
+                        model = VAR(var_data_scaled)
+                        results = model.fit(maxlags=3, ic='aic')
+                        
+                        # Store results
+                        contract_results[contract] = {
+                            'optimal_lag': results.k_ar,
+                            'aic': results.aic,
+                            'fpe': results.fpe,
+                            'granger_causality': {},
+                            'impulse_response': {}
+                        }
+                        
+                        # Granger causality tests
+                        for brand_var in brand_vars:
+                            for perf_var in [price_var, volume_var]:
+                                gc_result = results.test_causality(caused=perf_var, causing=[brand_var], kind='f')
+                                contract_results[contract]['granger_causality'][f"{brand_var}->{perf_var}"] = {
+                                    'f_stat': gc_result['test_statistic'],
+                                    'p_value': gc_result['pvalue'],
+                                    'significant': gc_result['pvalue'] < 0.05
+                                }
+                                
+                                # Reverse direction
+                                gc_result = results.test_causality(caused=brand_var, causing=[perf_var], kind='f')
+                                contract_results[contract]['granger_causality'][f"{perf_var}->{brand_var}"] = {
+                                    'f_stat': gc_result['test_statistic'],
+                                    'p_value': gc_result['pvalue'],
+                                    'significant': gc_result['pvalue'] < 0.05
+                                }
+                        
+                        # Impulse response analysis
+                        irf = results.irf(10)  # 10 periods ahead
+                        
+                        # Store IRF results for key relationships
+                        for i, brand_var in enumerate([var for var in var_data_scaled.columns if var in brand_vars]):
+                            for j, perf_var in enumerate([var for var in var_data_scaled.columns if var in [price_var, volume_var]]):
+                                var_index = list(var_data_scaled.columns).index(brand_var)
+                                perf_index = list(var_data_scaled.columns).index(perf_var)
+                                
+                                # Brand equity shock -> Performance response
+                                contract_results[contract]['impulse_response'][f"{brand_var}->{perf_var}"] = {
+                                    'response': irf.irfs[:, perf_index, var_index].tolist()
+                                }
+            
+            pvar_results[category] = contract_results
+        
+        return pvar_results
+                
+    def analyze_brand_strength_over_time(self):
+        """
+        Analyze how brand strength affects NFT value persistence over time
+        """
+        if self.merged_analysis_data.empty:
+            print("No analysis data available. Please prepare data first.")
+            return
+        
+        # Group by brand category and month
+        time_trends = self.merged_analysis_data.groupby(['brand_category', 'year_month']).agg({
+            'price_eth_mean': 'mean',
+            'price_eth_count': 'sum',
+            'brand_awareness_index': 'mean',
+            'brand_loyalty_score': 'mean',
+            'perceived_quality_index': 'mean',
+            'brand_heritage_coefficient': 'mean',
+            'market_penetration_rate': 'mean'
+        }).reset_index()
+        
+        # Convert year_month to datetime
+        time_trends['date'] = pd.to_datetime(time_trends['year_month'] + '-01')
+        time_trends = time_trends.sort_values(['brand_category', 'date'])
+        
+        # Calculate cumulative metrics
+        time_trends['cumulative_volume'] = time_trends.groupby('brand_category')['price_eth_count'].cumsum()
+        
+        # Calculate price volatility (rolling 3-month standard deviation)
+        volatility = self.merged_analysis_data.groupby(['brand_category', 'year_month'])['price_eth_mean'].std().reset_index()
+        volatility['date'] = pd.to_datetime(volatility['year_month'] + '-01')
+        volatility = volatility.rename(columns={'price_eth_mean': 'price_volatility'})
+        
+        # Merge with time trends
+        time_trends = pd.merge(time_trends, volatility[['brand_category', 'date', 'price_volatility']], 
+                              on=['brand_category', 'date'], how='left')
+        
+        # Calculate price resilience: ratio of current price to max price so far
+        for category in time_trends['brand_category'].unique():
+            cat_data = time_trends[time_trends['brand_category'] == category].copy()
+            cat_data['max_price_so_far'] = cat_data['price_eth_mean'].cummax()
+            cat_data['price_resilience'] = cat_data['price_eth_mean'] / cat_data['max_price_so_far']
+            time_trends.loc[time_trends['brand_category'] == category, 'price_resilience'] = cat_data['price_resilience']
+        
+        # Calculate correlation between brand equity metrics and price resilience
+        correlation_results = {}
+        for category in time_trends['brand_category'].unique():
+            cat_data = time_trends[time_trends['brand_category'] == category]
+            correlations = {}
+            
+            for metric in ['brand_awareness_index', 'brand_loyalty_score', 'perceived_quality_index', 'brand_heritage_coefficient']:
+                corr, p_value = stats.pearsonr(cat_data[metric], cat_data['price_resilience'])
+                correlations[metric] = {'correlation': corr, 'p_value': p_value, 'significant': p_value < 0.05}
+            
+            correlation_results[category] = correlations
+        
+        return {
+            'time_trends': time_trends,
+            'correlations': correlation_results
+        }
+    
+    def visualize_results(self, time_series_results, pvar_results, brand_strength_results):
+        """
+        Create visualizations from the analysis results
+        """
+        # Set figure aesthetics for publication quality
+        plt.style.use('seaborn-v0_8-whitegrid')
+        plt.rcParams['figure.figsize'] = (12, 8)
+        plt.rcParams['font.family'] = 'serif'
+        plt.rcParams['font.serif'] = ['Times New Roman']
+        plt.rcParams['font.size'] = 12
+        plt.rcParams['axes.titlesize'] = 14
+        plt.rcParams['axes.labelsize'] = 12
+        
+        # Create output directory
+        os.makedirs('results', exist_ok=True)
+        
+        # 1. Time trends by brand category
+        plt.figure(figsize=(14, 10))
+        
+        # Price trends
+        plt.subplot(2, 2, 1)
+        time_data = brand_strength_results['time_trends']
+        for category in time_data['brand_category'].unique():
+            cat_data = time_data[time_data['brand_category'] == category]
+            plt.plot(cat_data['date'], cat_data['price_eth_mean'], label=category)
+        
+        plt.title('Average NFT Price by Brand Category')
+        plt.xlabel('Date')
+        plt.ylabel('Price (ETH)')
+        plt.legend()
+        plt.xticks(rotation=45)
+        
+        # Volume trends
+        plt.subplot(2, 2, 2)
+        for category in time_data['brand_category'].unique():
+            cat_data = time_data[time_data['brand_category'] == category]
+            plt.plot(cat_data['date'], cat_data['price_eth_count'], label=category)
+        
+        plt.title('Monthly Transaction Volume by Brand Category')
+        plt.xlabel('Date')
+        plt.ylabel('Number of Transactions')
+        plt.legend()
+        plt.xticks(rotation=45)
+        
+        # Price resilience
+        plt.subplot(2, 2, 3)
+        for category in time_data['brand_category'].unique():
+            cat_data = time_data[time_data['brand_category'] == category]
+            plt.plot(cat_data['date'], cat_data['price_resilience'], label=category)
+        
+        plt.title('Price Resilience by Brand Category')
+        plt.xlabel('Date')
+        plt.ylabel('Price Resilience (Current/Max)')
+        plt.legend()
+        plt.xticks(rotation=45)
+        
+        # Brand awareness over time
+        plt.subplot(2, 2, 4)
+        for category in time_data['brand_category'].unique():
+            cat_data = time_data[time_data['brand_category'] == category]
+            plt.plot(cat_data['date'], cat_data['brand_awareness_index'], label=category)
+        
+        plt.title('Brand Awareness Over Time')
+        plt.xlabel('Date')
+        plt.ylabel('Brand Awareness Index')
+        plt.legend()
+        plt.xticks(rotation=45)
+        
+        plt.tight_layout()
+        plt.savefig('results/time_trends.png', dpi=300)
+        
+        # 2. Regression coefficient heatmap for key relationships
+        sig_coeffs = {}
+        
+        for category, cat_results in time_series_results.items():
+            for dep_var, var_results in cat_results.items():
+                if dep_var in ['price_eth_mean', 'price_premium']:
+                    for var_name, coeff, p_value in var_results['significant_vars']:
+                        if var_name in self.brand_equity_metrics:
+                            key = f"{category}|{dep_var}|{var_name}"
+                            sig_coeffs[key] = coeff
+        
+        # Convert to DataFrame for heatmap
+        if sig_coeffs:
+            coeff_data = pd.Series(sig_coeffs).reset_index()
+            coeff_data[['Brand Category', 'Dependent Variable', 'Brand Metric']] = coeff_data['index'].str.split('|', expand=True)
+            coeff_pivot = coeff_data.pivot(index='Brand Metric', columns='Brand Category', values=0)
+            
+            plt.figure(figsize=(12, 10))
+            sns.heatmap(coeff_pivot, annot=True, cmap='RdBu_r', center=0, fmt='.2f')
+            plt.title('Significant Brand Equity Coefficients by Category')
+            plt.tight_layout()
+            plt.savefig('results/coefficient_heatmap.png', dpi=300)
+        
+        # 3. Granger causality network visualization
+        causality_counts = {category: {} for category in pvar_results.keys()}
+        
+        for category, contracts in pvar_results.items():
+            for contract, results in contracts.items():
+                for relation, stats in results['granger_causality'].items():
+                    if stats['significant']:
+                        if relation not in causality_counts[category]:
+                            causality_counts[category][relation] = 0
+                        causality_counts[category][relation] += 1
+        
+        # Create network graphs
+        for category, relations in causality_counts.items():
+            if relations:
+                G = nx.DiGraph()
+                
+                # Add nodes
+                all_vars = set()
+                for relation in relations.keys():
+                    source, target = relation.split('->')
+                    all_vars.add(source)
+                    all_vars.add(target)
+                
+                for var in all_vars:
+                    G.add_node(var)
+                
+                # Add edges with weights
+                for relation, count in relations.items():
+                    source, target = relation.split('->')
+                    G.add_edge(source, target, weight=count)
+                
+                plt.figure(figsize=(10, 8))
+                pos = nx.spring_layout(G, seed=42)
+                
+                # Draw nodes
+                nx.draw_networkx_nodes(G, pos, node_size=2000, 
+                                      node_color=['lightblue' if 'brand' in node else 'lightgreen' for node in G.nodes()])
+                
+                # Draw edges with width based on count
+                edges = G.edges()
+                weights = [G[u][v]['weight'] * 0.5 for u, v in edges]
+                nx.draw_networkx_edges(G, pos, width=weights, arrowsize=20, 
+                                      edge_color='gray', connectionstyle='arc3,rad=0.1')
+                
+                # Draw labels
+                nx.draw_networkx_labels(G, pos, font_size=10)
+                
+                plt.title(f'Granger Causality Network - {category.replace("_", " ").title()}')
+                plt.axis('off')
+                plt.tight_layout()
+                plt.savefig(f'results/causality_network_{category}.png', dpi=300)
+        
+        # 4. Plot correlation between brand metrics and price resilience
+        corr_data = []
+        for category, metrics in brand_strength_results['correlations'].items():
+            for metric, stats in metrics.items():
+                corr_data.append({
+                    'Brand Category': category.replace('_', ' ').title(),
+                    'Brand Metric': metric.replace('_', ' ').title(),
+                    'Correlation': stats['correlation'],
+                    'Significant': stats['significant']
+                })
+        
+        corr_df = pd.DataFrame(corr_data)
+        
+        plt.figure(figsize=(12, 8))
+        bars = sns.barplot(x='Brand Metric', y='Correlation', hue='Brand Category', data=corr_df)
+        
+        # Highlight significant correlations
+        for i, bar in enumerate(bars.patches):
+            if corr_df.iloc[i]['Significant']:
+                bar.set_edgecolor('black')
+                bar.set_linewidth(2)
+        
+        plt.title('Correlation between Brand Equity Metrics and Price Resilience')
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        plt.savefig('results/correlation_plot.png', dpi=300)
+        
+        print("Visualizations saved to 'results' directory")
+
+    def run_full_analysis(self):
+        """
+        Run the complete analysis pipeline
+        """
+        print("Starting NFT Brand Equity Analysis")
+        
+        print("\nStep 1: Collecting NFT transaction data...")
+        self.collect_all_nft_data()
+        
+        print("\nStep 2: Generating brand equity metrics...")
+        self.generate_brand_equity_metrics()
+        
+        print("\nStep 3: Merging and preparing data for analysis...")
+        self.merge_and_prepare_data()
+        
+        print("\nStep 4: Running time-series regression analysis...")
+        time_series_results = self.run_time_series_regression()
+        
+        print("\nStep 5: Running panel VAR analysis...")
+        pvar_results = self.panel_var_analysis()
+        
+        print("\nStep 6: Analyzing brand strength over time...")
+        brand_strength_results = self.analyze_brand_strength_over_time()
+        
+        print("\nStep 7: Visualizing results...")
+        self.visualize_results(time_series_results, pvar_results, brand_strength_results)
+        
+        print("\nAnalysis complete! Results are saved in the 'results' directory.")
+        
+        return {
+            'time_series_results': time_series_results,
+            'pvar_results': pvar_results,
+            'brand_strength_results': brand_strength_results
+        }
+
+# Execute the analysis
+if __name__ == "__main__":
+    # Initialize with your Alchemy API key
+    API_KEY = 'wJYH7VlLlTDUAqBYnE6gG94HUHFTqU76'
+    NETWORK = 'eth-mainnet'
+    
+    analyzer = NFTBrandEquityAnalyzer(API_KEY, NETWORK)
+    results = analyzer.run_full_analysis()
